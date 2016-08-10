@@ -1,8 +1,9 @@
-from flask import Flask, request
+from flask import Flask, request, send_file
 import requests
 import os
 from tinydb import TinyDB, where
 import urllib
+from ObjectCombine import objectCombine
 
 app = Flask(__name__)
 
@@ -18,10 +19,16 @@ def hello():
 @app.route('/object') #object file
 def getobject():
 
+    #TODO: handle no arguements given
+        #could be some 3D model explanation
+            #Also could just be a cool model
+        #actual model detail, don't rely on texture
+
     db = TinyDB('database/crawl.json') #load in the database
     slot_table = db.table('item_slots')
 
     items = {}
+    object_outputs = []
 
     for slot in slot_table.all():
         # also need to peel the class - may need to add to slots, or rename creatively
@@ -37,9 +44,24 @@ def getobject():
             continue
 
         item_obj = db_item[0]['object'] # [0] get the first result (could make notes if len > 1)
-        urllib.request.urlretrieve('https://www.dropbox.com/s/' + item_obj,'work_directory/' + item_obj[16:-5])#download to work_directory
+        item_mtl = db_item[0]['material']
+        item_img = db_item[0]['image']
+        obj_out = 'work_directory/' + item_obj[16:-5]
+        mtl_out = 'work_directory/' + item_mtl[16:-5]
         # 16:-5 is used to peel off the 15 char code + /, and to remove the ?dl=1
 
+        object_outputs.append(obj_out[:-4])#taking off extension
+
+        urllib.request.urlretrieve('https://www.dropbox.com/s/' + item_obj,obj_out)#download to work_directory
+        urllib.request.urlretrieve('https://www.dropbox.com/s/' + item_mtl,mtl_out)
+
+        urllib.request.urlretrieve('https://www.dropbox.com/s/' + item_img,'output/' + item_img[16:-5])# image goes to output
+
+
+    objectCombine(*object_outputs)
+
+    output_name = ''.join(filter(lambda ch: ch not in '\ /','_'.join(sorted(object_outputs))))
+    return send_file('../output/'+output_name+'.obj',as_attachment=True)
     # TODO: add shortcut if no items equipped, to return the base class model (and a scornful look :P )
         # may also want to control things like no class
 
@@ -66,7 +88,7 @@ def getobject():
                 #should save the filename in the database too
         # .obj and .mtl go into the temp, images go directly into the output folder
 
-        #can download (tested for .obj) with urllib.request.urlretieve(url,file_name)
+        #can download (tested for .obj) with urllib.request.urlretrieve(url,file_name)
         #though 'technically' legacy, I think I can handle that if needed
 
 
