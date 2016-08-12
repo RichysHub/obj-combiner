@@ -7,6 +7,26 @@ from ObjectCombine import objectCombine
 
 app = Flask(__name__)
 
+def makeName():
+    #will take an array of filenames, or perhaps a set of args, maybe both
+    #will use whatever clever means necersary to generate a filename that is unique
+        #TTS cache will store under url, so this is for internals really
+        #Want to avoid naming conficts from arising as much as possible
+            #one possibility is to use characters that we otherwise dissalow in item names
+                #any restirctions? I think it has to be ascii
+            #could use the databases internal name / number
+                #either the index (this may have issues on crossover, change of databsae, if we have saved outputs)
+                #could have a field called 'unique_id'
+                    #numeric ID that is independent of location in database
+                    #name that is designed to be like name, but just avoids conflicts
+                        #if fighter has a longsword, under 'longsword', and we want to add one for mage
+                            #mage sword gets an internal name of 'longsword_mage'
+                            #still accessed with just 'longsword', using the class to distinguish
+                #would need to avoid calling this before accessing the releavant database entries, to avoid overhead
+    #returns the name, without extension or directory as a string
+    pass
+
+
 
 @app.route('/')
 def hello():
@@ -15,6 +35,7 @@ def hello():
     with open('log.txt','a') as out:
         out.write('hey there!\n')
     return bot
+
 
 @app.route('/object') #object file
 def getobject():
@@ -29,6 +50,7 @@ def getobject():
 
     items = {}
     object_outputs = []
+    cleanup = []
 
     for slot in slot_table.all():
         # also need to peel the class - may need to add to slots, or rename creatively
@@ -52,15 +74,35 @@ def getobject():
 
         object_outputs.append(obj_out[:-4])#taking off extension
 
+        cleanup.append(obj_out) #simple list of files that need cleaning up
+        cleanup.append(mtl_out)
+
         urllib.request.urlretrieve('https://www.dropbox.com/s/' + item_obj,obj_out)#download to work_directory
         urllib.request.urlretrieve('https://www.dropbox.com/s/' + item_mtl,mtl_out)
 
         urllib.request.urlretrieve('https://www.dropbox.com/s/' + item_img,'output/' + item_img[16:-5])# image goes to output
 
 
-    objectCombine(*object_outputs)
+    objectCombine(*object_outputs) # combines the objects specified and sticks the output into output/
+
+    # Cleanup the working directory now that we've combined the objects and the like
+        #TODO: this may cause an issue if 2 users are loading the same object (or those that share a mesh)
+            #Perhaps to rectify this, each time the code runs it generates its own working directory
+                #generate a random string, check it's not an existing directory
+                    #work in that directory, then you can clean up the whole thing when finished
+
+    for file in cleanup:
+        os.remove(file)
+        #we just delete the files once we're done with them
+            #will remove last added 'sword.obj', which could cause issues if fighter + warrior have a sword.obj
+
 
     output_name = ''.join(filter(lambda ch: ch not in '\ /','_'.join(sorted(object_outputs))))
+
+
+
+
+
     return send_file('../output/'+output_name+'.obj',as_attachment=True)
     # TODO: add shortcut if no items equipped, to return the base class model (and a scornful look :P )
         # may also want to control things like no class
@@ -113,6 +155,10 @@ def getobject():
         # once again, helps avoid name conflicts
             # ie, can have 'mace' exist as both a main_hand and and an off_hand
             # can't do this with an 'is_offhand' field, as the model has to actually change
+
+
+    #TTS can't use sessions
+
 
     # user = request.args.get('user') #can get hold of request arguements
     # db = tinydb.TinyDB('barry.json') #note for how to do database with tinydb
