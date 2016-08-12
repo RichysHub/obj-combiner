@@ -7,7 +7,10 @@ from ObjectCombine import objectCombine
 
 app = Flask(__name__)
 
-def makeName():
+def makeName(*args):
+    #currently assumes you're passing 'unique_id's, can revisit if need to pass filenames
+    return '-'.join(sorted(list(args)))
+
     #will take an array of filenames, or perhaps a set of args, maybe both
     #will use whatever clever means necersary to generate a filename that is unique
         #TTS cache will store under url, so this is for internals really
@@ -24,7 +27,18 @@ def makeName():
                             #still accessed with just 'longsword', using the class to distinguish
                 #would need to avoid calling this before accessing the releavant database entries, to avoid overhead
     #returns the name, without extension or directory as a string
-    pass
+
+def getContent(drop_code,file_w_ext):
+    #passed a 15-digit dropbox code and a filename with extension, returns file contents (for obj and mtl)
+    if len(drop_code) != 15:
+        print('\nDropbox code {0} of incorrect length'.format(drop_code))
+        raise ValueError('Dropbox code of incorrect length')
+    return requests.get('https://www.dropbox.com/s/{0}/{1}?dl=1'.format(drop_code,file_w_ext)).content
+
+
+
+
+
 
 
 
