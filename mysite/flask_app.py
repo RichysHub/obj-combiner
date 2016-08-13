@@ -1,15 +1,15 @@
 from flask import Flask, request, send_file
 import requests
-import os
 from tinydb import TinyDB, where
 import urllib
-from ObjectCombine import objectCombine
+from imagepacker import pack_images
+# TODO: add import for pack_images
 
 app = Flask(__name__)
 
 def makeName(*args):
     #currently assumes you're passing 'unique_id's, can revisit if need to pass filenames
-    return '-'.join(sorted(list(args)))
+    return '-'.join(sorted(*args))
 
     #will take an array of filenames, or perhaps a set of args, maybe both
     #will use whatever clever means necersary to generate a filename that is unique
@@ -33,151 +33,254 @@ def getContent(drop_code,file_w_ext):
     if len(drop_code) != 15:
         print('\nDropbox code {0} of incorrect length'.format(drop_code))
         raise ValueError('Dropbox code of incorrect length')
-    return requests.get('https://www.dropbox.com/s/{0}/{1}?dl=1'.format(drop_code,file_w_ext)).content
+    return requests.get('https://www.dropbox.com/s/{0}/{1}?dl=1'.format(drop_code,file_w_ext)).text
+
+def storeImage(drop_code,file_w_ext):
+    #TODO: instead use a custom folder per request, so that can be deleted safetly afterwards
+    #TODO: this is a bit meh, same format as getContent, but different output functionality
+    #passed a 15-digit dropbox code and a filename with extension, returns file contents (for obj and mtl)
+    image_path = 'work_directory/{0}'.format(file_w_ext)
+    urllib.request.urlretrieve('https://www.dropbox.com/s/{0}/{1}?dl=1'.format(drop_code,file_w_ext), image_path)
+    return image_path
 
 
+# TODO: add check for marker file, check for file in output
+# TODO: add case if there is only 1 file specified, just return the file from db with flask.redirect
+# TODO: handle no args given (default model?) - crawl logo?
+# TODO: make the combine objects occur outside of the route, and just call it, allowing /image to initiate
+@app.route('/object') # get request for object file
+def combineObjects():
+
+    db = TinyDB('database/crawl.json')
+    slot_table = db.table('item_slots')
+
+    object_files = []
+    object_ids = []
+    material_files = []
+    texture_paths = []
+
+    # TODO: add searching for class and adding those files in
+    selected_class = request.args.get('class')
+
+    for slot in slot_table.all(): #find the objects in the db, and go fetch the obj and mtl to strings
+        slot_name = slot['name']
+        item = request.args.get(slot_name)
+        if item is None:
+            continue #slot wasn't specified
+        db_item = db.search((where('name') == item) & (where('class') == selected_class))[0]
+        object_ids.append(db_item['unique_id'])
+        #Obtain drop_codes and filenames (either 2 fields or 1)
+        #Fetch obj and mtl files, save strings to array
+        object_files.append(getContent(db_item['obj_code'], db_item['obj_name']))
+        material_files.append(getContent(db_item['mtl_code'], db_item['mtl_name']))
+        #Fetch texture image and save to file (storing the username too)
+            #Images will have to go to a temp folder, and be cleaned up later
+        image_path = storeImage(db_item['img_code'], db_item['img_name'])
+        texture_paths.append(image_path)
 
 
+    # output name is a combination of unique ids, therefore is unique to this loadout
+    output_name = makeName(object_ids)
 
+    #TODO: now name is known, make marker file?
 
+    diffuse_maps = [] #paths, relative to the packer?, to fetch the images
+    names = []
+    new_mtl_lines = []
+    image_out_name = 'output/' + output_name + '.png'
+
+    for mat_index, material_file in enumerate(material_files): #combines all the materials, as well as gleaning relevant info
+        for line in material_file.split('\n'): #split into lines by linebreaks
+            line = line.strip()
+
+            if line.startswith('newmtl'):
+                name = line[7:] #peels off 'newmtl '
+                if name and name != 'None':
+                    if len(diffuse_maps) != len(names): #TODO rework this? due to prepacked nature of inputs
+                        #We should have no way into this. We should check to exclude lines that use a map_kd not from file
+                        names.pop() # last material ignored as no diffuse
+                    # TODO: name = + name #need to prepend something based on file, to avoid conflicts of common things like 'bodymtl'
+                    names.append(name)
+                else:
+                    continue # None materials not added to output
+            elif line.startswith('map_'):
+                mtype,m = line.split(' ',1)
+                if mtype.lower() == 'map_kd': #diffuse map
+                    #Add check that m is the correct texture image, else don't add it to the diffuse_maps array
+
+                    # Add the diffuse image to the dmaps array
+                        #This line is a bit odd, as we enforce that the files in the database are prepacked
+                            #perhaps should rework how we do this? Given we have prepacked database of items
+                    #TODO: if we're DOING the check, we should just do a count and add it that many times at end of loop?
+                    diffuse_maps.append(texture_paths[mat_index]) # add filepath to the relevant image
+                    line = ' '.join([mtype, image_out_name]) # Change mtl to point to the output image
+
+                else:
+                    continue # ignore non-diffuse texture maps
+            elif line.startswith('d '):
+                continue # ignoring transparency values
+            elif line.startswith('#'):
+                continue    #ignore the comment lines
+
+            new_mtl_lines.append(line)
+
+        if len(diffuse_maps) != len(names):
+            names.pop() #last material had no diffuse
+
+    assert(len(names) == len(diffuse_maps))
+    texmap = dict(zip(names,diffuse_maps)) #texture map is mapping of material names, to the images
+
+    # NOTE: def of AABB, and some lines in object reading are only to deal with cropping the input textures
+        # this is implemented for completeness,
+        # but if items in database are strictly prepackaged, and therefore already cropped, we dont need it
+
+    class AABB():
+        def __init__(self, min_x=None, min_y=None, max_x=None, max_y=None):
+                self.min_x = min_x
+                self.min_y = min_y
+                self.max_x = max_x
+                self.max_y = max_y
+
+                self.to_tile = False
+
+        def add(self, x,y):
+                self.min_x = min(self.min_x, x) if self.min_x else x
+                self.min_y = min(self.min_y, y) if self.min_y else y
+                self.max_x = max(self.max_x, x) if self.max_x else x
+                self.max_y = max(self.max_y, y) if self.max_y else y
+
+        def uv_wrap(self):
+                return (self.max_x - self.min_x, self.max_y - self.min_y)
+
+        def tiling(self):
+                if self.min_x < 0 or self.min_y < 0 or self.max_x > 1 or self.max_y > 1:
+                    return (self.max_x - self.min_x, self.max_y - self.min_y)
+                return None
+
+        def __repr__(self):
+                return "({},{}) ({},{})".format(
+                    self.min_x,
+                    self.min_y,
+                    self.max_x,
+                    self.max_y
+                )
+
+    textents = {name: AABB() for name in set(diffuse_maps)}
+
+    uv_lines = []
+    curr_mtl = None
+    used_mtl = set()
+
+    obj_lines =[]
+    # Reading the object files, combing them and updating vertex references
+    vertex_counts = {'v':0,'vt':0,'vn':0} #counts of vertices, texture vertices, and normal vertices
+    for object_file in object_files:
+        line_offset = len(obj_lines) #offset to obtain indices for line in combined file
+
+        offsets = [vertex_counts['v'], vertex_counts['vt'], vertex_counts['vn']]
+        for line_idx, line in enumerate(object_file.split('\n')):
+            line = line.strip()
+
+            if line.startswith('v '):
+                vertex_counts['v'] += 1
+            elif line.startswith('vn'):
+                vertex_counts['vn'] += 1
+            elif line.startswith('vt'):
+                vertex_counts['vt'] += 1
+                uv_lines.append(line_idx + line_offset)
+            elif line.startswith('usemtl'):
+                mtl_name = line[7:] # remove 'usemtl '
+                curr_mtl = mtl_name
+            elif line.startswith('f '):
+                #although offsets only apply after the first mesh, we need to go uv calcs
+                face_vertices = line.split()[1:] #split on spaces, ignoring 'f'
+                for index, vertex in enumerate(face_vertices):
+                    vertex_indices = vertex.split('/') #splitting v/vt/vn
+                    for ind, val in enumerate(vertex_indices):
+                        if val != '': #handles v//vn format
+                            #use of ind here allows code to cover v, v/vt, v//vn and v/vt/vn formats
+                            vertex_indices[ind] = str(int(val) + offsets[ind])
+                    if len(vertex_indices) >= 2 and vertex_indices[1]: #ignores v and v//vn formats
+                        uv_idx = int(vertex_indices[1]) - 1 # uv indices start from 1
+                        uv_line_idx = uv_lines[uv_idx]
+                        uv_line = obj_lines[uv_line_idx][3:] # fetches 'vt ' line that this vertex uses
+                        uv = [float(uv.strip()) for uv in uv_line.split()]
+
+                        if curr_mtl and curr_mtl in texmap:
+                            used_mtl.add(mtl_name)
+                            # update the texture extents in the texture map so that used region is added
+                            textents[texmap[curr_mtl]].add(uv[0], uv[1])
+                    face_vertices[index] = '/'.join(vertex_indices)
+
+                line = 'f ' + ' '.join(face_vertices) + '\n'
+            obj_lines.append(line) #comments, objects, groups and such
+
+    # TODO this currently does not support tiling of uv's, it would be added here
+
+    # TODO if we want to add a small watermark-like image to the output
+        #here would be the place to add it to the diffuse_maps
+
+    #Pack the images into a single file
+    output_image, uv_changes = pack_images(list(set(diffuse_maps)), extents=textents)
+
+    uv_line = [] #TODO, is this reset and the re-making needed?
+    curr_mtl = None
+
+    #TODO, if we only modify mtllib and f lines, why not store their indexes, and work through them?
+        #vt lines for textures not in the texmap would be affected, but do we care?
+            #infact, should we not strip these out? What are they for?
+                #Stripping them would require to change above structure, keeping a 'block' of things that use mtllibs
+                #usemtl always come before faces that use them, but maybe we need vertices that follow :/
+    # apply changes to .obj UV's
+    new_obj_lines = []
+    for line_idx, line in enumerate(obj_lines):
+        if line.startswith("vt"):
+            uv_lines.append(line_idx)
+            new_obj_lines.append(line)
+        elif line.startswith("usemtl"):
+            mtl_name = line[7:]
+            curr_mtl = mtl_name
+            new_obj_lines.append(line)
+        elif line.startswith("f"): # face definitions
+            for vertex in line.split()[1:]: # individual vertex definitions
+                vertex_indices = vertex.split(sep="/")
+                if len(vertex_indices) >= 2 and vertex_indices[1]: # ignores v and v//vn formats
+                    uv_idx = int(vertex_indices[1]) - 1 # uv indexes start from 1
+                    uv_line_idx = uv_lines[uv_idx]
+                    uv_line = obj_lines[uv_line_idx][3:] #fetches relevant 'vt ' line
+                    uv = [float(uv.strip()) for uv in uv_line.split()]
+
+                    if curr_mtl and curr_mtl in texmap:
+                        changes = uv_changes[texmap[curr_mtl]]
+
+                        new_obj_lines[uv_line_idx] = "vt {0} {1}".format(
+                            (uv[0] * changes["aspect"][0] + changes["offset"][0]),
+                            (uv[1] * changes["aspect"][1] + changes["offset"][1])
+                        )
+            new_obj_lines.append(line)
+        elif line.startswith("mtllib"): # change mtl file name
+            print("\tupdated obj's mtllib to",output_name+".mtl")
+            new_obj_lines.append("mtllib " + output_name+".mtl")
+        else:
+            new_obj_lines.append(line)
+
+    # save the combined files to output directory
+    with open('output/{0}.obj'.format(output_name),'w') as new_obj:
+        new_obj.write('\n'.join(new_obj_lines))
+    with open('output/{0}.mtl'.format(output_name),'w') as new_mtl:
+        new_mtl.write('\n'.join(new_mtl_lines))
+    output_image.save(image_out_name,format='PNG')
+
+    # TODO: clean the images out of the temp folder
+    # TODO: remove the marker file
+
+    #return the obj file
+    return send_file('../output/'+output_name+'.obj',as_attachment=True)
 
 
 @app.route('/')
 def hello():
-    #image = requests.get('https://www.dropbox.com/s/v6shp2get5b3gez/Dr%20Boom_packed_full.png?dl=1')
-    bot = requests.get('https://www.dropbox.com/s/5rxlttrp5adhd9y/bomb%20bot.obj?dl=1').content
-    with open('log.txt','a') as out:
-        out.write('hey there!\n')
-    return bot
-
-
-@app.route('/object') #object file
-def getobject():
-
-    #TODO: handle no arguements given
-        #could be some 3D model explanation
-            #Also could just be a cool model
-        #actual model detail, don't rely on texture
-
-    db = TinyDB('database/crawl.json') #load in the database
-    slot_table = db.table('item_slots')
-
-    items = {}
-    object_outputs = []
-    cleanup = []
-
-    for slot in slot_table.all():
-        # also need to peel the class - may need to add to slots, or rename creatively
-        slot_name = slot['name']
-        item = request.args.get(slot_name)
-        items.update({slot_name:item})  # we may not need to create this, may be able to do a single loop
-        if item is None: #potentially it returns 'None' as a string?
-            continue
-
-        db_item = db.search(where('name') == item)
-
-        if db_item == []:
-            continue
-
-        item_obj = db_item[0]['object'] # [0] get the first result (could make notes if len > 1)
-        item_mtl = db_item[0]['material']
-        item_img = db_item[0]['image']
-        obj_out = 'work_directory/' + item_obj[16:-5]
-        mtl_out = 'work_directory/' + item_mtl[16:-5]
-        # 16:-5 is used to peel off the 15 char code + /, and to remove the ?dl=1
-
-        object_outputs.append(obj_out[:-4])#taking off extension
-
-        cleanup.append(obj_out) #simple list of files that need cleaning up
-        cleanup.append(mtl_out)
-
-        urllib.request.urlretrieve('https://www.dropbox.com/s/' + item_obj,obj_out)#download to work_directory
-        urllib.request.urlretrieve('https://www.dropbox.com/s/' + item_mtl,mtl_out)
-
-        urllib.request.urlretrieve('https://www.dropbox.com/s/' + item_img,'output/' + item_img[16:-5])# image goes to output
-
-
-    objectCombine(*object_outputs) # combines the objects specified and sticks the output into output/
-
-    # Cleanup the working directory now that we've combined the objects and the like
-        #TODO: this may cause an issue if 2 users are loading the same object (or those that share a mesh)
-            #Perhaps to rectify this, each time the code runs it generates its own working directory
-                #generate a random string, check it's not an existing directory
-                    #work in that directory, then you can clean up the whole thing when finished
-
-    for file in cleanup:
-        os.remove(file)
-        #we just delete the files once we're done with them
-            #will remove last added 'sword.obj', which could cause issues if fighter + warrior have a sword.obj
-
-
-    output_name = ''.join(filter(lambda ch: ch not in '\ /','_'.join(sorted(object_outputs))))
-
-
-
-
-
-    return send_file('../output/'+output_name+'.obj',as_attachment=True)
-    # TODO: add shortcut if no items equipped, to return the base class model (and a scornful look :P )
-        # may also want to control things like no class
-
-    # TODO: sanitise imputs!!!
-
-    for item in items:
-        pass
-
-
-    return str(items)
-
-    # will need to create the output name, by combining the item slot+name(ignoring Nones) then combining together
-    # need to fetch the urls from the item names, querying database a lot
-        # one query to get each item after that, it's dict manipulation
-    # unlike the local version, we can't get hold of the .mtl without the directions
-        # will need to store .mtl and image urls too
-            #may need to save the filenames for those documents?
-
-    # if we're storing to a local file, we are basically setting us up to use the existing objectCombine function
-
-    # look through the items find the files (.obj,.mtl,.png/jpg) (require only 1 image per item)
-        #save the files to the temporary drive
-            #need to ensure we have proper names - image in particular will be referenced in .mtl
-                #should save the filename in the database too
-        # .obj and .mtl go into the temp, images go directly into the output folder
-
-        #can download (tested for .obj) with urllib.request.urlretrieve(url,file_name)
-        #though 'technically' legacy, I think I can handle that if needed
-
-
-    # folders containing the files lies on a dropbox account (we don't care whos)
-        # we assume dropbox, because it'll save some space in the database
-    # plan to create a manager spreadsheet living on google docs
-        # potentially multiple, one for each class
-        # potentially just sheets = class, and some other way splitting slots
-    # this spreadhseet will be easier to manage
-    # write a python script to take an outputted csv (or even just a link to the doc) and update the database
-        # once this gets sorted, adding items will be:
-            # create objects, upload to dropbox
-            # add links to the files in the spreadsheet
-            # export the csv and run through the database editor
-                # either rewrite db at home, and upload, or do it live
-                # 'edit' will be a purge and replace (probably easier than writing checks to see if it exists already)
-                        # basically going the easy route, rather than writing own VCS
-
-    # might make more sense to have a table per class, this helps avoid name conflicts
-        # for now we'll just use default - we're expecting the database to be replaced often
-    # might want to include something to do with slots, even just have 'slot' as an entry
-        # once again, helps avoid name conflicts
-            # ie, can have 'mace' exist as both a main_hand and and an off_hand
-            # can't do this with an 'is_offhand' field, as the model has to actually change
-
-
-    #TTS can't use sessions
-
-
-    # user = request.args.get('user') #can get hold of request arguements
-    # db = tinydb.TinyDB('barry.json') #note for how to do database with tinydb
-
-    # return 'yeah boi!'
+    return 'Welcome to Richys.pythonanywhere.com'
 
 @app.route('/image') #image file
 def getImage():
