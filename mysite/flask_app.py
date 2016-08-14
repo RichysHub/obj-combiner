@@ -1,32 +1,16 @@
-from flask import Flask, request, send_file
+from flask import Flask, request, send_file, redirect
 import requests
 from tinydb import TinyDB, where
 import urllib
 from imagepacker import pack_images
-# TODO: add import for pack_images
+import os
+from shutil import rmtree
 
 app = Flask(__name__)
 
 def makeName(*args):
     #currently assumes you're passing 'unique_id's, can revisit if need to pass filenames
     return '-'.join(sorted(*args))
-
-    #will take an array of filenames, or perhaps a set of args, maybe both
-    #will use whatever clever means necersary to generate a filename that is unique
-        #TTS cache will store under url, so this is for internals really
-        #Want to avoid naming conficts from arising as much as possible
-            #one possibility is to use characters that we otherwise dissalow in item names
-                #any restirctions? I think it has to be ascii
-            #could use the databases internal name / number
-                #either the index (this may have issues on crossover, change of databsae, if we have saved outputs)
-                #could have a field called 'unique_id'
-                    #numeric ID that is independent of location in database
-                    #name that is designed to be like name, but just avoids conflicts
-                        #if fighter has a longsword, under 'longsword', and we want to add one for mage
-                            #mage sword gets an internal name of 'longsword_mage'
-                            #still accessed with just 'longsword', using the class to distinguish
-                #would need to avoid calling this before accessing the releavant database entries, to avoid overhead
-    #returns the name, without extension or directory as a string
 
 def getContent(drop_code,file_w_ext):
     #passed a 15-digit dropbox code and a filename with extension, returns file contents (for obj and mtl)
@@ -35,11 +19,11 @@ def getContent(drop_code,file_w_ext):
         raise ValueError('Dropbox code of incorrect length')
     return requests.get('https://www.dropbox.com/s/{0}/{1}?dl=1'.format(drop_code,file_w_ext)).text
 
-def storeImage(drop_code,file_w_ext):
+def storeImage(temporary_dir, drop_code, file_w_ext):
     #TODO: instead use a custom folder per request, so that can be deleted safetly afterwards
     #TODO: this is a bit meh, same format as getContent, but different output functionality
-    #passed a 15-digit dropbox code and a filename with extension, returns file contents (for obj and mtl)
-    image_path = 'work_directory/{0}'.format(file_w_ext)
+    #passed a 15-digit dropbox code and a filename with extension, path to image
+    image_path = '{0}/{1}'.format(temporary_dir, file_w_ext)
     urllib.request.urlretrieve('https://www.dropbox.com/s/{0}/{1}?dl=1'.format(drop_code,file_w_ext), image_path)
     return image_path
 
@@ -49,38 +33,99 @@ def storeImage(drop_code,file_w_ext):
 # TODO: handle no args given (default model?) - crawl logo?
 # TODO: make the combine objects occur outside of the route, and just call it, allowing /image to initiate
 @app.route('/object') # get request for object file
-def combineObjects():
+def getObject():
 
     db = TinyDB('database/crawl.json')
     slot_table = db.table('item_slots')
-
-    object_files = []
-    object_ids = []
-    material_files = []
-    texture_paths = []
-
-    # TODO: add searching for class and adding those files in
+    db_items = []
     selected_class = request.args.get('class')
+    object_ids = []
+    #looking for m.v.p to get the output_name in order to look for output, or marker
+    for slot in slot_table.all():
+        slot_name = slot['name']
+        item = request.args.get(slot_name)
+        if item is None:
+            continue #slot wasn't specified
+        # TODO: handle having no class
+        db_item = db.search((where('name') == item) & (where('class') == selected_class))[0]
+        db_items.append(db_item)
+        object_ids.append(db_item['unique_id'])
 
-    for slot in slot_table.all(): #find the objects in the db, and go fetch the obj and mtl to strings
+    # output name is a combination of unique ids, therefore is unique to this loadout
+    output_name = makeName(object_ids)
+
+    # with filename, check in outputs
+    if os.path.isfile('output/{0}.obj'.format(output_name)):
+        print('Returning {0} object from sudo-cache'.format(output_name))
+        return send_file('../output/{0}.obj'.format(output_name),as_attachment=True)
+
+    # handle zero input
+    if len(db_items) == 0:
+        pass
+    # handle single input
+    elif len(db_items) ==1:
+        # gets url for the item's dropbox, and redirects to it
+        item = db_items[0]
+        url = 'https://www.dropbox.com/s/{0}/{1}?dl=1'.format(item['obj_code'], item['obj_name'])
+        return redirect(url)
+    else:
+        combineObjects(db_items, output_name)
+        #return the obj file
+        return send_file('../output/{0}.obj'.format(output_name),as_attachment=True)
+
+@app.route('/image') #image file
+def getImage():
+    db = TinyDB('database/crawl.json')
+    slot_table = db.table('item_slots')
+    db_items = []
+    selected_class = request.args.get('class')
+    object_ids = []
+    #looking for m.v.p to get the output_name in order to look for output, or marker
+    for slot in slot_table.all():
         slot_name = slot['name']
         item = request.args.get(slot_name)
         if item is None:
             continue #slot wasn't specified
         db_item = db.search((where('name') == item) & (where('class') == selected_class))[0]
+        db_items.append(db_item)
         object_ids.append(db_item['unique_id'])
-        #Obtain drop_codes and filenames (either 2 fields or 1)
-        #Fetch obj and mtl files, save strings to array
-        object_files.append(getContent(db_item['obj_code'], db_item['obj_name']))
-        material_files.append(getContent(db_item['mtl_code'], db_item['mtl_name']))
-        #Fetch texture image and save to file (storing the username too)
-            #Images will have to go to a temp folder, and be cleaned up later
-        image_path = storeImage(db_item['img_code'], db_item['img_name'])
-        texture_paths.append(image_path)
-
 
     # output name is a combination of unique ids, therefore is unique to this loadout
     output_name = makeName(object_ids)
+
+    # with filename, check in outputs
+    if os.path.isfile('output/{0}.png'.format(output_name)):
+        print('Returning {0} image from sudo-cache'.format(output_name))
+        return send_file('../output/{0}.png'.format(output_name),as_attachment=True)
+
+    if len(db_items) == 0:
+        pass
+    # handle single input
+    elif len(db_items) ==1:
+        # gets url for the item's dropbox, and redirects to it
+        item = db_items[0]
+        url = 'https://www.dropbox.com/s/{0}/{1}?dl=1'.format(item['img_code'], item['img_name'])
+        return redirect(url)
+    else:
+        combineObjects(db_items, output_name)
+        #return the texture file
+        return send_file('../output/{0}.png'.format(output_name),as_attachment=True)
+
+def combineObjects(db_items, output_name):
+    # accepts database items and output name, to avoid calculating twice
+    object_files = []
+    material_files = []
+    texture_paths = []
+
+    os.mkdir(output_name) # create the temporary directory (will use this as markfile?)
+
+    for db_item in db_items:
+        #Fetch obj and mtl files, save strings to array
+        object_files.append(getContent(db_item['obj_code'], db_item['obj_name']))
+        material_files.append(getContent(db_item['mtl_code'], db_item['mtl_name']))
+        #Fetch texture image and save to file
+        image_path = storeImage(output_name, db_item['img_code'], db_item['img_name'])
+        texture_paths.append(image_path)
 
     #TODO: now name is known, make marker file?
 
@@ -267,24 +312,19 @@ def combineObjects():
     # save the combined files to output directory
     with open('output/{0}.obj'.format(output_name),'w') as new_obj:
         new_obj.write('\n'.join(new_obj_lines))
-    with open('output/{0}.mtl'.format(output_name),'w') as new_mtl:
-        new_mtl.write('\n'.join(new_mtl_lines))
+    # material doesn't actually need to be kept
+    #with open('output/{0}.mtl'.format(output_name),'w') as new_mtl:
+    #    new_mtl.write('\n'.join(new_mtl_lines))
     output_image.save(image_out_name,format='PNG')
 
     # TODO: clean the images out of the temp folder
     # TODO: remove the marker file
 
-    #return the obj file
-    return send_file('../output/'+output_name+'.obj',as_attachment=True)
-
+    rmtree(output_name)
 
 @app.route('/')
 def hello():
     return 'Welcome to Richys.pythonanywhere.com'
-
-@app.route('/image') #image file
-def getImage():
-    return 'Also yes!'
 
 if __name__ == '__main__':
     app.run()
