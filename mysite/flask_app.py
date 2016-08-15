@@ -5,8 +5,14 @@ import urllib
 from imagepacker import pack_images
 import os
 from shutil import rmtree
+from spacemaker import shrink_folder_to
 
 app = Flask(__name__)
+
+@app.teardown_request
+def clenseOutput():
+    # removes oldest files until output folder is under limit (in bytes)
+    shrink_folder_to(2600000,'output')
 
 def makeName(*args):
     #currently assumes you're passing 'unique_id's, can revisit if need to pass filenames
@@ -20,67 +26,29 @@ def getContent(drop_code,file_w_ext):
     return requests.get('https://www.dropbox.com/s/{0}/{1}?dl=1'.format(drop_code,file_w_ext)).text
 
 def storeImage(temporary_dir, drop_code, file_w_ext):
-    #TODO: instead use a custom folder per request, so that can be deleted safetly afterwards
-    #TODO: this is a bit meh, same format as getContent, but different output functionality
     #passed a 15-digit dropbox code and a filename with extension, path to image
     image_path = '{0}/{1}'.format(temporary_dir, file_w_ext)
     urllib.request.urlretrieve('https://www.dropbox.com/s/{0}/{1}?dl=1'.format(drop_code,file_w_ext), image_path)
     return image_path
 
 
-# TODO: add check for marker file, check for file in output
-# TODO: add case if there is only 1 file specified, just return the file from db with flask.redirect
 # TODO: handle no args given (default model?) - crawl logo?
-# TODO: make the combine objects occur outside of the route, and just call it, allowing /image to initiate
 @app.route('/object') # get request for object file
 def getObject():
-
-    db = TinyDB('database/crawl.json')
-    slot_table = db.table('item_slots')
-    db_items = []
-    selected_class = request.args.get('class')
-    object_ids = []
-    #looking for m.v.p to get the output_name in order to look for output, or marker
-    for slot in slot_table.all():
-        slot_name = slot['name']
-        item = request.args.get(slot_name)
-        if item is None:
-            continue #slot wasn't specified
-        # TODO: handle having no class
-        db_item = db.search((where('name') == item) & (where('class') == selected_class))[0]
-        db_items.append(db_item)
-        object_ids.append(db_item['unique_id'])
-
-    # output name is a combination of unique ids, therefore is unique to this loadout
-    output_name = makeName(object_ids)
-
-    # with filename, check in outputs
-    if os.path.isfile('output/{0}.obj'.format(output_name)):
-        print('Returning {0} object from sudo-cache'.format(output_name))
-        return send_file('../output/{0}.obj'.format(output_name),as_attachment=True)
-
-    # handle zero input
-    if len(db_items) == 0:
-        pass
-    # handle single input
-    elif len(db_items) ==1:
-        # gets url for the item's dropbox, and redirects to it
-        item = db_items[0]
-        url = 'https://www.dropbox.com/s/{0}/{1}?dl=1'.format(item['obj_code'], item['obj_name'])
-        return redirect(url)
-    else:
-        combineObjects(db_items, output_name)
-        #return the obj file
-        return send_file('../output/{0}.obj'.format(output_name),as_attachment=True)
+    return getByExtension('obj')
 
 @app.route('/image') #image file
 def getImage():
+    return getByExtension('png')
+
+def getByExtension(extension):
+    # takes extension, of form .<ext>, ie 'png' or 'obj'
     db = TinyDB('database/crawl.json')
     slot_table = db.table('item_slots')
     db_items = []
     selected_class = request.args.get('class')
     object_ids = []
-    #looking for m.v.p to get the output_name in order to look for output, or marker
+    # minimum work possible, to get the output name, to check in output/
     for slot in slot_table.all():
         slot_name = slot['name']
         item = request.args.get(slot_name)
@@ -94,22 +62,27 @@ def getImage():
     output_name = makeName(object_ids)
 
     # with filename, check in outputs
-    if os.path.isfile('output/{0}.png'.format(output_name)):
-        print('Returning {0} image from sudo-cache'.format(output_name))
-        return send_file('../output/{0}.png'.format(output_name),as_attachment=True)
+    if os.path.isfile('output/{0}.{1}'.format(output_name, extension)):
+        print('Returning {0}.{1} from psuedo-cache'.format(output_name, extension))
+        return send_file('../output/{0}.{1}'.format(output_name, extension),as_attachment=True)
 
     if len(db_items) == 0:
+        #TODO: redirect this to either homepage, or serve a default file
         pass
     # handle single input
     elif len(db_items) ==1:
         # gets url for the item's dropbox, and redirects to it
         item = db_items[0]
-        url = 'https://www.dropbox.com/s/{0}/{1}?dl=1'.format(item['img_code'], item['img_name'])
+        if extension == 'obj': # based on extension returns either object or image
+            url = 'https://www.dropbox.com/s/{0}/{1}?dl=1'.format(item['obj_code'], item['obj_name'])
+        else:
+            url = 'https://www.dropbox.com/s/{0}/{1}?dl=1'.format(item['img_code'], item['img_name'])
+
         return redirect(url)
     else:
         combineObjects(db_items, output_name)
-        #return the texture file
-        return send_file('../output/{0}.png'.format(output_name),as_attachment=True)
+        #return the file
+        return send_file('../output/{0}.{1}'.format(output_name, extension),as_attachment=True)
 
 def combineObjects(db_items, output_name):
     # accepts database items and output name, to avoid calculating twice
@@ -127,8 +100,6 @@ def combineObjects(db_items, output_name):
         image_path = storeImage(output_name, db_item['img_code'], db_item['img_name'])
         texture_paths.append(image_path)
 
-    #TODO: now name is known, make marker file?
-
     diffuse_maps = [] #paths, relative to the packer?, to fetch the images
     names = []
     new_mtl_lines = []
@@ -141,10 +112,10 @@ def combineObjects(db_items, output_name):
             if line.startswith('newmtl'):
                 name = line[7:] #peels off 'newmtl '
                 if name and name != 'None':
-                    if len(diffuse_maps) != len(names): #TODO rework this? due to prepacked nature of inputs
-                        #We should have no way into this. We should check to exclude lines that use a map_kd not from file
+                    if len(diffuse_maps) != len(names):
+                        #We should have no way into this. We should check to exclude lines that use a map_kd from file
                         names.pop() # last material ignored as no diffuse
-                    # TODO: name = + name #need to prepend something based on file, to avoid conflicts of common things like 'bodymtl'
+                    # TODO: name = + name #prepend something here if conflicts become an issue
                     names.append(name)
                 else:
                     continue # None materials not added to output
@@ -152,14 +123,8 @@ def combineObjects(db_items, output_name):
                 mtype,m = line.split(' ',1)
                 if mtype.lower() == 'map_kd': #diffuse map
                     #Add check that m is the correct texture image, else don't add it to the diffuse_maps array
-
-                    # Add the diffuse image to the dmaps array
-                        #This line is a bit odd, as we enforce that the files in the database are prepacked
-                            #perhaps should rework how we do this? Given we have prepacked database of items
-                    #TODO: if we're DOING the check, we should just do a count and add it that many times at end of loop?
                     diffuse_maps.append(texture_paths[mat_index]) # add filepath to the relevant image
                     line = ' '.join([mtype, image_out_name]) # Change mtl to point to the output image
-
                 else:
                     continue # ignore non-diffuse texture maps
             elif line.startswith('d '):
@@ -271,11 +236,6 @@ def combineObjects(db_items, output_name):
     uv_line = [] #TODO, is this reset and the re-making needed?
     curr_mtl = None
 
-    #TODO, if we only modify mtllib and f lines, why not store their indexes, and work through them?
-        #vt lines for textures not in the texmap would be affected, but do we care?
-            #infact, should we not strip these out? What are they for?
-                #Stripping them would require to change above structure, keeping a 'block' of things that use mtllibs
-                #usemtl always come before faces that use them, but maybe we need vertices that follow :/
     # apply changes to .obj UV's
     new_obj_lines = []
     for line_idx, line in enumerate(obj_lines):
@@ -317,14 +277,15 @@ def combineObjects(db_items, output_name):
     #    new_mtl.write('\n'.join(new_mtl_lines))
     output_image.save(image_out_name,format='PNG')
 
-    # TODO: clean the images out of the temp folder
-    # TODO: remove the marker file
-
+    # removes the temporary folder that was storing images, and the images therein
     rmtree(output_name)
 
 @app.route('/')
 def hello():
+    #TODO: add a proper homepage
     return 'Welcome to Richys.pythonanywhere.com'
+
+#TODO: add a page with which you can search the database, and display items (Pyglet based rendering?)
 
 if __name__ == '__main__':
     app.run()
