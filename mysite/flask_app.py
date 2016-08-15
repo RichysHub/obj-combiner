@@ -9,10 +9,12 @@ from spacemaker import shrink_folder_to
 
 app = Flask(__name__)
 
+# Teardown cleans up the output folder
 @app.teardown_request
-def clenseOutput():
+def clenseOutput(f):
     # removes oldest files until output folder is under limit (in bytes)
-    shrink_folder_to(2600000,'output')
+    # 104857600 is 100 Mebibytes
+    shrink_folder_to(104857600, 'output')
 
 def makeName(*args):
     #currently assumes you're passing 'unique_id's, can revisit if need to pass filenames
@@ -54,9 +56,11 @@ def getByExtension(extension):
         item = request.args.get(slot_name)
         if item is None:
             continue #slot wasn't specified
-        db_item = db.search((where('name') == item) & (where('class') == selected_class))[0]
-        db_items.append(db_item)
-        object_ids.append(db_item['unique_id'])
+        db_item = db.search((where('name') == item) & (where('class') == selected_class) & (where('slot') == slot_name))
+        if db_item:
+            db_item = db_item[0]
+            db_items.append(db_item)
+            object_ids.append(db_item['unique_id'])
 
     # output name is a combination of unique ids, therefore is unique to this loadout
     output_name = makeName(object_ids)
@@ -68,7 +72,7 @@ def getByExtension(extension):
 
     if len(db_items) == 0:
         #TODO: redirect this to either homepage, or serve a default file
-        pass
+        return 'nope'
     # handle single input
     elif len(db_items) ==1:
         # gets url for the item's dropbox, and redirects to it
