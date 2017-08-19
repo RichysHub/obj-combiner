@@ -20,3 +20,4 @@ Created and posed in Blender
 ![Lunge Spin Showcase](http://i.imgur.com/4CIRCGL.gif)
 ![Sword & Board Angles Showcase](http://i.imgur.com/i7QxDrI.gif)
 ![Sword & Board Spin Showcase](http://i.imgur.com/ZFjKTcR.gif)
+![Textures Flame Sword](http://i.imgur.com/rUw8gvl.gif)
